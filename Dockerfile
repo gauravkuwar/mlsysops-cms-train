@@ -16,7 +16,7 @@ RUN pip install --no-cache-dir \
 
 # Copy application files
 COPY flow.py /app/flow.py
-COPY model.pth /app/model.pth
+# COPY model.pth /app/model.pth
 
 # Expose port for FastAPI
 EXPOSE 8000
