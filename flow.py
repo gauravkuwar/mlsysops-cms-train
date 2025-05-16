@@ -1,5 +1,3 @@
-# NOT MY PART - USING MOCK CODE
-
 import os
 import time
 import torch
@@ -8,28 +6,52 @@ import asyncio
 from fastapi import FastAPI, HTTPException
 from prefect import flow, task, get_run_logger
 from mlflow.tracking import MlflowClient
-from transformers import DistilBertForSequenceClassification
+from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
-# Load semi pre-trained model
-MODEL_PATH = "model.pth"
+# Set tracking URI early
 MODEL_NAME = "mlsysops-cms-model"
 
 app = FastAPI()
 pipeline_lock = asyncio.Lock()
 
+mock_config = {
+    "initial_epochs": 2,
+    "total_epochs": 1,
+    "patience": 2,
+    "batch_size": 128,
+    "lr": 2e-5,
+    "fine_tune_lr": 1e-5,
+    "max_len": 128,
+    "dropout_probability": 0.3,
+    "model_name": "google/bert_uncased_L-2_H-128_A-2"
+}
+
 @task
 def load_and_train_model():
     logger = get_run_logger()
-    logger.info("Pretending to train, actually just loading a model...")
-    time.sleep(10)
+    logger.info("Pretending to train, actually just loading a model (because this is not my part)...")
+    # time.sleep(10)
 
-    # device = torch.device("cpu")
-    model = DistilBertForSequenceClassification.from_pretrained("distilbert-base-uncased")
-    # state_dict = torch.load(MODEL_PATH, map_location=device)
-    # model.load_state_dict(state_dict)
-    
-    logger.info("Logging model to MLflow...")
-    mlflow.pytorch.log_model(model, artifact_path="model")
+    model = AutoModelForSequenceClassification.from_pretrained(
+        mock_config["model_name"],
+        num_labels=1
+    )
+
+    tokenizer = AutoTokenizer.from_pretrained(mock_config["model_name"])
+    inputs = tokenizer("Example input for classification", return_tensors="pt", padding=True, truncation=True)
+
+    input_example = {
+        "input_ids": inputs["input_ids"].numpy(),
+        "attention_mask": inputs["attention_mask"].numpy()
+    }
+
+    logger.info("Logging model and config to MLflow...")
+
+    mlflow.log_param("run_type", "mock")
+    for k, v in mock_config.items():
+        mlflow.log_param(k, v)
+
+    mlflow.pytorch.log_model(model, artifact_path="model", input_example=input_example)
     return model
 
 @task
@@ -38,7 +60,6 @@ def evaluate_model():
     logger.info("Model evaluation on basic metrics...")
     accuracy = 0.85
     loss = 0.35
-    logger.info(f"Logging metrics: accuracy={accuracy}, loss={loss}")
     mlflow.log_metric("accuracy", accuracy)
     mlflow.log_metric("loss", loss)
     return accuracy >= 0.80
@@ -51,17 +72,27 @@ def register_model_if_passed(passed: bool):
         return None
 
     logger.info("Registering model in MLflow Model Registry...")
-    client = MlflowClient()
-    run_id = mlflow.active_run().info.run_id
+    run = mlflow.active_run()
+    run_id = run.info.run_id
     model_uri = f"runs:/{run_id}/model"
-    registered_model = mlflow.register_model(model_uri=model_uri, name=MODEL_NAME)
+    client = MlflowClient()
+
+    # Ensure the model name exists
+    try:
+        client.get_registered_model(MODEL_NAME)
+    except mlflow.exceptions.RestException:
+        client.create_registered_model(MODEL_NAME)
+
+    # Register the new version
+    model_version = client.create_model_version(name=MODEL_NAME, source=model_uri, run_id=run_id)
+
     client.set_registered_model_alias(
         name=MODEL_NAME,
         alias="development",
-        version=registered_model.version
+        version=model_version.version
     )
-    logger.info(f"Model registered (v{registered_model.version}) and alias 'development' assigned.")
-    return registered_model.version
+    logger.info(f"Model registered (v{model_version.version}) and alias 'development' assigned.")
+    return model_version.version
 
 @flow(name="mlflow_flow")
 def ml_pipeline_flow():

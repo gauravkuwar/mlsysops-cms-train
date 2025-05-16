@@ -12,7 +12,8 @@ RUN pip install --no-cache-dir \
     mlflow \
     fastapi \
     uvicorn \
-    transformers
+    transformers \
+    pandas
 
 RUN apt-get update && apt-get install -y git
 ENV GIT_PYTHON_REFRESH=quiet
