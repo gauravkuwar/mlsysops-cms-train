@@ -14,6 +14,9 @@ RUN pip install --no-cache-dir \
     uvicorn \
     transformers
 
+RUN apt-get update && apt-get install -y git
+ENV GIT_PYTHON_REFRESH=quiet
+
 # Copy application files
 COPY flow.py /app/flow.py
 # COPY model.pth /app/model.pth
