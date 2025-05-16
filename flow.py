@@ -1,5 +1,4 @@
 import os
-import time
 import torch
 import mlflow
 import asyncio
@@ -8,7 +7,6 @@ from prefect import flow, task, get_run_logger
 from mlflow.tracking import MlflowClient
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
-# Set tracking URI early
 MODEL_NAME = "mlsysops-cms-model"
 
 app = FastAPI()
@@ -30,7 +28,6 @@ mock_config = {
 def load_and_train_model():
     logger = get_run_logger()
     logger.info("Pretending to train, actually just loading a model (because this is not my part)...")
-    # time.sleep(10)
 
     model = AutoModelForSequenceClassification.from_pretrained(
         mock_config["model_name"],
@@ -52,24 +49,12 @@ def load_and_train_model():
         mlflow.log_param(k, v)
 
     mlflow.pytorch.log_model(model, artifact_path="model", input_example=input_example)
+
     return model
 
 @task
-def evaluate_model():
+def register_model():
     logger = get_run_logger()
-    logger.info("Model evaluation on basic metrics...")
-    accuracy = 0.85
-    loss = 0.35
-    mlflow.log_metric("accuracy", accuracy)
-    mlflow.log_metric("loss", loss)
-    return accuracy >= 0.80
-
-@task
-def register_model_if_passed(passed: bool):
-    logger = get_run_logger()
-    if not passed:
-        logger.info("Evaluation did not pass criteria. Skipping registration.")
-        return None
 
     logger.info("Registering model in MLflow Model Registry...")
     run = mlflow.active_run()
@@ -77,13 +62,11 @@ def register_model_if_passed(passed: bool):
     model_uri = f"runs:/{run_id}/model"
     client = MlflowClient()
 
-    # Ensure the model name exists
     try:
         client.get_registered_model(MODEL_NAME)
     except mlflow.exceptions.RestException:
         client.create_registered_model(MODEL_NAME)
 
-    # Register the new version
     model_version = client.create_model_version(name=MODEL_NAME, source=model_uri, run_id=run_id)
 
     client.set_registered_model_alias(
@@ -91,6 +74,7 @@ def register_model_if_passed(passed: bool):
         alias="development",
         version=model_version.version
     )
+
     logger.info(f"Model registered (v{model_version.version}) and alias 'development' assigned.")
     return model_version.version
 
@@ -98,8 +82,7 @@ def register_model_if_passed(passed: bool):
 def ml_pipeline_flow():
     with mlflow.start_run():
         load_and_train_model()
-        passed = evaluate_model()
-        version = register_model_if_passed(passed)
+        version = register_model()
         return version
 
 @app.post("/trigger-training")
