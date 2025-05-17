@@ -1,103 +1,72 @@
-import os
 import torch
 import mlflow
-import asyncio
-from fastapi import FastAPI, HTTPException
 from prefect import flow, task, get_run_logger
 from mlflow.tracking import MlflowClient
-from transformers import AutoModelForSequenceClassification, AutoTokenizer
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+from sklearn.metrics import accuracy_score
 
 MODEL_NAME = "mlsysops-cms-model"
-
-app = FastAPI()
-pipeline_lock = asyncio.Lock()
-
-mock_config = {
-    "initial_epochs": 2,
-    "total_epochs": 1,
-    "patience": 2,
-    "batch_size": 128,
-    "lr": 2e-5,
-    "fine_tune_lr": 1e-5,
-    "max_len": 128,
-    "dropout_probability": 0.3,
-    "model_name": "google/bert_uncased_L-2_H-128_A-2"
-}
+ALIAS = "development"
+STAGING_THRESHOLD = 0.80
 
 @task
-def load_and_train_model():
+def load_model_and_tokenizer():
     logger = get_run_logger()
-    logger.info("Pretending to train, actually just loading a model (because this is not my part)...")
-
-    model = AutoModelForSequenceClassification.from_pretrained(
-        mock_config["model_name"],
-        num_labels=1
-    )
-
-    tokenizer = AutoTokenizer.from_pretrained(mock_config["model_name"])
-    inputs = tokenizer("Example input for classification", return_tensors="pt", padding=True, truncation=True)
-
-    input_example = {
-        "input_ids": inputs["input_ids"].numpy(),
-        "attention_mask": inputs["attention_mask"].numpy()
-    }
-
-    logger.info("Logging model and config to MLflow...")
-
-    mlflow.log_param("run_type", "mock")
-    for k, v in mock_config.items():
-        mlflow.log_param(k, v)
-
-    mlflow.pytorch.log_model(model, artifact_path="model", input_example=input_example)
-
-    return model
-
-@task
-def register_model():
-    logger = get_run_logger()
-
-    logger.info("Registering model in MLflow Model Registry...")
-    run = mlflow.active_run()
-    run_id = run.info.run_id
-    model_uri = f"runs:/{run_id}/model"
+    logger.info(f"Loading model from alias: {MODEL_NAME}/{ALIAS}")
     client = MlflowClient()
+    version_info = client.get_model_version_by_alias(MODEL_NAME, ALIAS)
+    model_uri = f"models:/{MODEL_NAME}/{version_info.version}"
+    model = mlflow.pytorch.load_model(model_uri)
+    tokenizer = AutoTokenizer.from_pretrained("google/bert_uncased_L-2_H-128_A-2")
+    model.eval()
+    return model, tokenizer
 
+@task
+def load_test_data():
+    texts = ["you are amazing", "you are terrible"]
+    labels = [1, 0]
+    return texts, labels
+
+@task
+def run_evaluation(model, tokenizer, texts, labels):
+    logger = get_run_logger()
+    inputs = tokenizer(texts, return_tensors="pt", padding=True, truncation=True)
+    with torch.no_grad():
+        outputs = model(**inputs)
+        preds = outputs.logits.argmax(dim=1).tolist()
+
+    acc = accuracy_score(labels, preds)
+    logger.info(f"Evaluation accuracy: {acc:.4f}")
+    mlflow.log_metric("eval_accuracy", acc)
+    return acc
+
+@task
+def promote_to_staging_if_good(acc: float):
+    logger = get_run_logger()
+    if acc < STAGING_THRESHOLD:
+        logger.info("Model did not meet staging threshold.")
+        return None
+
+    logger.info("Promoting model to 'Staging' stage and 'staging' alias")
+    client = MlflowClient()
     try:
-        client.get_registered_model(MODEL_NAME)
-    except mlflow.exceptions.RestException:
-        client.create_registered_model(MODEL_NAME)
+        version = client.get_model_version_by_alias(MODEL_NAME, ALIAS).version
+        client.transition_model_version_stage(MODEL_NAME, version, stage="Staging")
+        client.set_registered_model_alias(MODEL_NAME, "staging", version)
+        logger.info(f"Promoted version {version} to 'Staging' and aliased as 'staging'")
+        return version
+    except Exception as e:
+        logger.error(f"Failed to promote model: {e}")
+        return None
 
-    model_version = client.create_model_version(name=MODEL_NAME, source=model_uri, run_id=run_id)
-
-    client.set_registered_model_alias(
-        name=MODEL_NAME,
-        alias="development",
-        version=model_version.version
-    )
-
-    logger.info(f"Model registered (v{model_version.version}) and alias 'development' assigned.")
-    return model_version.version
-
-@flow(name="mlflow_flow")
-def ml_pipeline_flow():
-    with mlflow.start_run():
-        load_and_train_model()
-        version = register_model()
+@flow(name="evaluation_flow")
+def evaluation_flow():
+    with mlflow.start_run(run_name="evaluation"):
+        model, tokenizer = load_model_and_tokenizer()
+        texts, labels = load_test_data()
+        acc = run_evaluation(model, tokenizer, texts, labels)
+        version = promote_to_staging_if_good(acc)
         return version
 
-@app.post("/trigger-training")
-async def trigger_training():
-    if pipeline_lock.locked():
-        raise HTTPException(status_code=423, detail="Pipeline is already running. Please wait.")
-
-    async with pipeline_lock:
-        loop = asyncio.get_event_loop()
-        version = await loop.run_in_executor(None, ml_pipeline_flow)
-        if version:
-            return {"status": "Pipeline executed successfully", "new_model_version": version}
-        else:
-            return {"status": "Pipeline executed, but no new model registered"}
-
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    evaluation_flow()

@@ -10,19 +10,15 @@ RUN pip install --no-cache-dir \
 RUN pip install --no-cache-dir \
     prefect \
     mlflow \
-    fastapi \
-    uvicorn \
-    transformers
+    transformers \
+    scikit-learn \
+    pandas
 
 RUN apt-get update && apt-get install -y git
 ENV GIT_PYTHON_REFRESH=quiet
 
-# Copy application files
+# Copy evaluation code
 COPY flow.py /app/flow.py
-# COPY model.pth /app/model.pth
 
-# Expose port for FastAPI
-EXPOSE 8000
-
-# Start FastAPI server
+# Run evaluation when container starts
 ENTRYPOINT ["python", "flow.py"]
